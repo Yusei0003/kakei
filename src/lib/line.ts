@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { CATEGORIES, CategoryId } from "@/lib/categories";
+import { CategoryId } from "@/lib/categories";
 
 export function verifyLineSignature(rawBody: string, signature: string | null): boolean {
   const secret = process.env.LINE_CHANNEL_SECRET;
@@ -87,20 +87,22 @@ export function textMessage(text: string): LineMessage {
   return { type: "text", text };
 }
 
+/** categoriesは支出用・収入用のどちらか一方を呼び出し側(kindに応じて)渡すこと */
 export function categoryQuickReplyMessage(
   text: string,
-  expenseId: string
+  transactionId: string,
+  categories: { id: CategoryId; label: string }[]
 ): LineMessage {
   return {
     type: "text",
     text,
     quickReply: {
-      items: CATEGORIES.map((c) => ({
+      items: categories.map((c) => ({
         type: "action",
         action: {
           type: "postback",
           label: c.label,
-          data: `action=category&expenseId=${expenseId}&category=${c.id}`,
+          data: `action=category&transactionId=${transactionId}&category=${c.id}`,
           displayText: c.label,
         },
       })),
@@ -110,7 +112,7 @@ export function categoryQuickReplyMessage(
 
 export function duplicateQuickReplyMessage(
   text: string,
-  expenseId: string,
+  transactionId: string,
   duplicateCandidateId: string
 ): LineMessage {
   return {
@@ -123,7 +125,7 @@ export function duplicateQuickReplyMessage(
           action: {
             type: "postback",
             label: "重複としてまとめる",
-            data: `action=duplicate&expenseId=${expenseId}&candidateId=${duplicateCandidateId}&resolution=merge`,
+            data: `action=duplicate&transactionId=${transactionId}&candidateId=${duplicateCandidateId}&resolution=merge`,
             displayText: "重複としてまとめる",
           },
         },
@@ -131,16 +133,12 @@ export function duplicateQuickReplyMessage(
           type: "action",
           action: {
             type: "postback",
-            label: "別々の支出として記録",
-            data: `action=duplicate&expenseId=${expenseId}&candidateId=${duplicateCandidateId}&resolution=separate`,
-            displayText: "別々の支出として記録",
+            label: "別々の取引として記録",
+            data: `action=duplicate&transactionId=${transactionId}&candidateId=${duplicateCandidateId}&resolution=separate`,
+            displayText: "別々の取引として記録",
           },
         },
       ],
     },
   };
-}
-
-export function isCategoryId(value: string): value is CategoryId {
-  return CATEGORIES.some((c) => c.id === value);
 }

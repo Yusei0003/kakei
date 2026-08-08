@@ -3,30 +3,36 @@ import { CategoryId } from "@/lib/categories";
 import { getLearnedCategory } from "@/lib/storeCategory";
 import { findDuplicateCandidates } from "@/lib/dedup";
 
-export type ExpenseSource = "receipt" | "manual" | "paypay" | "credit_card";
-export type ExpenseStatus = "pending_category" | "pending_duplicate" | "confirmed";
+export type TransactionSource = "receipt" | "manual" | "paypay" | "credit_card" | "bank";
+export type TransactionKind = "expense" | "income";
+export type TransactionStatus = "pending_category" | "pending_duplicate" | "confirmed";
+export type Account = "yucho" | "iwate" | "paypay" | "rakuten_card" | "cash";
 
-export interface Expense {
+export interface Transaction {
   id: string;
   occurredAt: string;
   amount: number;
+  kind: TransactionKind;
   category: CategoryId | null;
+  account: Account | null;
   storeName: string | null;
   memo: string | null;
-  source: ExpenseSource;
+  source: TransactionSource;
   sourceRef: string | null;
   isTransfer: boolean;
-  status: ExpenseStatus;
+  status: TransactionStatus;
   duplicateOf: string | null;
   lineUserId: string;
   createdAt: string;
 }
 
-interface ExpenseRow {
+interface TransactionRow {
   id: string;
   occurred_at: string;
   amount: number;
+  kind: string;
   category: string | null;
+  account: string | null;
   store_name: string | null;
   memo: string | null;
   source: string;
@@ -38,31 +44,35 @@ interface ExpenseRow {
   created_at: string;
 }
 
-function rowToExpense(row: ExpenseRow): Expense {
+function rowToTransaction(row: TransactionRow): Transaction {
   return {
     id: row.id,
     occurredAt: row.occurred_at,
     amount: row.amount,
+    kind: row.kind as TransactionKind,
     category: row.category as CategoryId | null,
+    account: row.account as Account | null,
     storeName: row.store_name,
     memo: row.memo,
-    source: row.source as ExpenseSource,
+    source: row.source as TransactionSource,
     sourceRef: row.source_ref,
     isTransfer: row.is_transfer,
-    status: row.status as ExpenseStatus,
+    status: row.status as TransactionStatus,
     duplicateOf: row.duplicate_of,
     lineUserId: row.line_user_id,
     createdAt: row.created_at,
   };
 }
 
-export interface NewExpenseCandidate {
+export interface NewTransactionCandidate {
   lineUserId: string;
   occurredAt: Date;
   amount: number;
+  kind: TransactionKind;
   storeName?: string;
   memo?: string;
-  source: ExpenseSource;
+  account?: Account;
+  source: TransactionSource;
   sourceRef?: string;
   isTransfer?: boolean;
   /** レシート写真やLINEテキストなど、ユーザーがその場でカテゴリを指定した場合 */
@@ -71,16 +81,16 @@ export interface NewExpenseCandidate {
 
 export type InsertResult =
   | { outcome: "skipped_duplicate_source" }
-  | { outcome: "inserted"; expense: Expense };
+  | { outcome: "inserted"; transaction: Transaction };
 
 /**
- * 支出候補を1件登録する。
+ * 取引候補を1件登録する。
  * 優先順位: 重複疑いがあれば pending_duplicate、なければカテゴリ未確定なら
  * pending_category、両方クリアなら confirmed。
  * 同一ソースの再取込（source + source_ref重複）はDBのunique制約で弾かれるのでスキップ扱いにする。
  */
-export async function insertExpenseCandidate(
-  input: NewExpenseCandidate
+export async function insertTransactionCandidate(
+  input: NewTransactionCandidate
 ): Promise<InsertResult> {
   const supabase = getSupabaseServerClient();
 
@@ -93,10 +103,11 @@ export async function insertExpenseCandidate(
     lineUserId: input.lineUserId,
     occurredAt: input.occurredAt,
     amount: input.amount,
+    kind: input.kind,
     excludeSource: input.source,
   });
 
-  const status: ExpenseStatus =
+  const status: TransactionStatus =
     duplicates.length > 0
       ? "pending_duplicate"
       : category
@@ -104,12 +115,14 @@ export async function insertExpenseCandidate(
         : "pending_category";
 
   const { data, error } = await supabase
-    .from("expenses")
+    .from("transactions")
     .insert({
       line_user_id: input.lineUserId,
       occurred_at: input.occurredAt.toISOString(),
       amount: input.amount,
+      kind: input.kind,
       category,
+      account: input.account ?? null,
       store_name: input.storeName ?? null,
       memo: input.memo ?? null,
       source: input.source,
@@ -128,28 +141,28 @@ export async function insertExpenseCandidate(
     throw error;
   }
 
-  return { outcome: "inserted", expense: rowToExpense(data as ExpenseRow) };
+  return { outcome: "inserted", transaction: rowToTransaction(data as TransactionRow) };
 }
 
-export async function getExpenseById(id: string): Promise<Expense | null> {
+export async function getTransactionById(id: string): Promise<Transaction | null> {
   const supabase = getSupabaseServerClient();
   const { data, error } = await supabase
-    .from("expenses")
+    .from("transactions")
     .select()
     .eq("id", id)
     .maybeSingle();
 
   if (error) throw error;
-  return data ? rowToExpense(data as ExpenseRow) : null;
+  return data ? rowToTransaction(data as TransactionRow) : null;
 }
 
-export async function updateExpense(
+export async function updateTransaction(
   id: string,
-  patch: Partial<Pick<Expense, "category" | "status" | "duplicateOf">>
+  patch: Partial<Pick<Transaction, "category" | "status" | "duplicateOf">>
 ): Promise<void> {
   const supabase = getSupabaseServerClient();
   const { error } = await supabase
-    .from("expenses")
+    .from("transactions")
     .update({
       ...(patch.category !== undefined ? { category: patch.category } : {}),
       ...(patch.status !== undefined ? { status: patch.status } : {}),

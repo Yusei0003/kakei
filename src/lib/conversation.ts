@@ -1,12 +1,12 @@
 import { getSupabaseServerClient } from "@/lib/supabase";
 import {
-  Expense,
-  getExpenseById,
-  updateExpense,
-} from "@/lib/expenses";
+  Transaction,
+  getTransactionById,
+  updateTransaction,
+} from "@/lib/transactions";
 import { findDuplicateCandidates } from "@/lib/dedup";
 import { saveLearnedCategory } from "@/lib/storeCategory";
-import { CategoryId } from "@/lib/categories";
+import { CategoryId, EXPENSE_CATEGORIES, INCOME_CATEGORIES } from "@/lib/categories";
 import {
   categoryQuickReplyMessage,
   duplicateQuickReplyMessage,
@@ -15,7 +15,7 @@ import {
 interface ConversationStateRow {
   line_user_id: string;
   pending_queue: string[];
-  current_expense_id: string | null;
+  current_transaction_id: string | null;
   awaiting: "category" | "duplicate" | null;
 }
 
@@ -33,7 +33,7 @@ async function loadState(lineUserId: string): Promise<ConversationStateRow> {
   return {
     line_user_id: lineUserId,
     pending_queue: [],
-    current_expense_id: null,
+    current_transaction_id: null,
     awaiting: null,
   };
 }
@@ -44,7 +44,7 @@ async function saveState(state: ConversationStateRow): Promise<void> {
     {
       line_user_id: state.line_user_id,
       pending_queue: state.pending_queue,
-      current_expense_id: state.current_expense_id,
+      current_transaction_id: state.current_transaction_id,
       awaiting: state.awaiting,
       updated_at: new Date().toISOString(),
     },
@@ -53,15 +53,15 @@ async function saveState(state: ConversationStateRow): Promise<void> {
   if (error) throw error;
 }
 
-/** CSV/PDF取込などでまとめて発生した確認待ちの支出をキューへ積む */
+/** CSV/PDF取込などでまとめて発生した確認待ちの取引をキューへ積む */
 export async function enqueuePending(
   lineUserId: string,
-  expenseIds: string[]
+  transactionIds: string[]
 ): Promise<void> {
-  if (expenseIds.length === 0) return;
+  if (transactionIds.length === 0) return;
   const state = await loadState(lineUserId);
-  const existing = new Set([...state.pending_queue, state.current_expense_id]);
-  state.pending_queue.push(...expenseIds.filter((id) => !existing.has(id)));
+  const existing = new Set([...state.pending_queue, state.current_transaction_id]);
+  state.pending_queue.push(...transactionIds.filter((id) => !existing.has(id)));
   await saveState(state);
 }
 
@@ -73,47 +73,50 @@ type QuickReplyMessage = ReturnType<typeof categoryQuickReplyMessage>;
  */
 export async function askNext(lineUserId: string): Promise<QuickReplyMessage[]> {
   const state = await loadState(lineUserId);
-  if (state.current_expense_id) return [];
+  if (state.current_transaction_id) return [];
 
   while (state.pending_queue.length > 0) {
     const nextId = state.pending_queue.shift()!;
-    const expense = await getExpenseById(nextId);
-    if (!expense || expense.status === "confirmed") continue; // 既に別経路で解決済み
+    const tx = await getTransactionById(nextId);
+    if (!tx || tx.status === "confirmed") continue; // 既に別経路で解決済み
 
-    if (expense.status === "pending_duplicate") {
+    if (tx.status === "pending_duplicate") {
       const candidates = await findDuplicateCandidates({
         lineUserId,
-        occurredAt: new Date(expense.occurredAt),
-        amount: expense.amount,
-        excludeSource: expense.source,
+        occurredAt: new Date(tx.occurredAt),
+        amount: tx.amount,
+        kind: tx.kind,
+        excludeSource: tx.source,
       });
       if (candidates.length === 0) {
         // 候補が消えていた（相手側が削除等）→ カテゴリ確認へフォールバック
-        await updateExpense(expense.id, { status: "pending_category" });
+        await updateTransaction(tx.id, { status: "pending_category" });
         state.pending_queue.unshift(nextId);
         await saveState(state);
         continue;
       }
-      state.current_expense_id = expense.id;
+      state.current_transaction_id = tx.id;
       state.awaiting = "duplicate";
       await saveState(state);
       return [
         duplicateQuickReplyMessage(
-          `${formatExpenseLine(expense)}\nこれは既に記録済みの支出と同じものですか？（${candidates[0].storeName ?? "店名不明"} / ${candidates[0].amount}円）`,
-          expense.id,
+          `${formatTransactionLine(tx)}\nこれは既に記録済みの取引と同じものですか？（${candidates[0].storeName ?? "相手先不明"} / ${candidates[0].amount}円）`,
+          tx.id,
           candidates[0].id
         ),
       ];
     }
 
     // pending_category
-    state.current_expense_id = expense.id;
+    state.current_transaction_id = tx.id;
     state.awaiting = "category";
     await saveState(state);
+    const categories = tx.kind === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
     return [
       categoryQuickReplyMessage(
-        `${formatExpenseLine(expense)}\nカテゴリを選んでください`,
-        expense.id
+        `${formatTransactionLine(tx)}\nカテゴリを選んでください`,
+        tx.id,
+        categories
       ),
     ];
   }
@@ -122,61 +125,62 @@ export async function askNext(lineUserId: string): Promise<QuickReplyMessage[]> 
   return [];
 }
 
-function formatExpenseLine(expense: Expense): string {
-  const date = new Date(expense.occurredAt);
+function formatTransactionLine(tx: Transaction): string {
+  const date = new Date(tx.occurredAt);
   const dateStr = `${date.getMonth() + 1}/${date.getDate()}`;
-  const store = expense.storeName ? ` ${expense.storeName}` : "";
-  return `${dateStr}${store} ${expense.amount}円`;
+  const store = tx.storeName ? ` ${tx.storeName}` : "";
+  const kindLabel = tx.kind === "income" ? "収入" : "支出";
+  return `[${kindLabel}] ${dateStr}${store} ${tx.amount}円`;
 }
 
 export async function resolveCategory(
   lineUserId: string,
-  expenseId: string,
+  transactionId: string,
   category: CategoryId
 ): Promise<void> {
   const state = await loadState(lineUserId);
-  if (state.current_expense_id !== expenseId) return; // 古いボタンの押し直しは無視
+  if (state.current_transaction_id !== transactionId) return; // 古いボタンの押し直しは無視
 
-  const expense = await getExpenseById(expenseId);
-  await updateExpense(expenseId, { category, status: "confirmed" });
+  const tx = await getTransactionById(transactionId);
+  await updateTransaction(transactionId, { category, status: "confirmed" });
 
-  // 送金は相手によって用途が毎回変わるため学習させない
-  if (expense && !expense.isTransfer && expense.storeName) {
-    await saveLearnedCategory(lineUserId, expense.storeName, category);
+  // 送金・振込は相手によって用途が毎回変わるため学習させない
+  if (tx && !tx.isTransfer && tx.storeName) {
+    await saveLearnedCategory(lineUserId, tx.storeName, category);
   }
 
-  state.current_expense_id = null;
+  state.current_transaction_id = null;
   state.awaiting = null;
   await saveState(state);
 }
 
 export async function resolveDuplicate(
   lineUserId: string,
-  expenseId: string,
+  transactionId: string,
   candidateId: string,
   resolution: "merge" | "separate"
 ): Promise<void> {
   const state = await loadState(lineUserId);
-  if (state.current_expense_id !== expenseId) return;
+  if (state.current_transaction_id !== transactionId) return;
 
   if (resolution === "merge") {
-    await updateExpense(expenseId, {
+    await updateTransaction(transactionId, {
       status: "confirmed",
       duplicateOf: candidateId,
     });
   } else {
-    const expense = await getExpenseById(expenseId);
-    const alreadyHasCategory = expense?.category != null;
-    await updateExpense(expenseId, {
+    const tx = await getTransactionById(transactionId);
+    const alreadyHasCategory = tx?.category != null;
+    await updateTransaction(transactionId, {
       status: alreadyHasCategory ? "confirmed" : "pending_category",
     });
     if (!alreadyHasCategory) {
       // カテゴリ確認へ引き続き進めるためキューの先頭に戻す
-      state.pending_queue.unshift(expenseId);
+      state.pending_queue.unshift(transactionId);
     }
   }
 
-  state.current_expense_id = null;
+  state.current_transaction_id = null;
   state.awaiting = null;
   await saveState(state);
 }

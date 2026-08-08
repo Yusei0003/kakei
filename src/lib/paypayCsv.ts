@@ -2,6 +2,8 @@
 // 列: 取引日,出金金額（円）,入金金額（円）,海外出金金額,通貨,変換レート（円）,
 //     利用国,取引内容,取引先,取引方法,支払い区分,利用者,取引番号
 
+import { parseCsvLine } from "@/lib/csvLine";
+
 export interface PaypayTransaction {
   occurredAt: Date;
   amount: number;
@@ -102,43 +104,4 @@ function parseJstDateTime(value: string): Date {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) throw new Error(`invalid date: ${value}`);
   return date;
-}
-
-/**
- * 引用符で囲まれたフィールド内のカンマ（例: "PayPayポイント (5円), PayPay残高 (370円)"）
- * を壊さずに1行をカラム配列へ分解する、依存ライブラリ不要の簡易CSVパーサー。
- */
-function parseCsvLine(line: string): string[] {
-  const cols: string[] = [];
-  let current = "";
-  let inQuotes = false;
-
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-
-    if (inQuotes) {
-      if (c === '"') {
-        if (line[i + 1] === '"') {
-          current += '"';
-          i += 1;
-        } else {
-          inQuotes = false;
-        }
-      } else {
-        current += c;
-      }
-      continue;
-    }
-
-    if (c === '"') {
-      inQuotes = true;
-    } else if (c === ",") {
-      cols.push(current);
-      current = "";
-    } else {
-      current += c;
-    }
-  }
-  cols.push(current);
-  return cols;
 }

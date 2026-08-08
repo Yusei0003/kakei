@@ -1,21 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   fetchMessageContent,
-  isCategoryId,
   replyMessage,
   textMessage,
   verifyLineSignature,
 } from "@/lib/line";
+import { isCategoryId } from "@/lib/categories";
 import {
   LineEvent,
   LineMessageEvent,
   LinePostbackEvent,
   LineWebhookBody,
 } from "@/lib/lineWebhookTypes";
-import { insertExpenseCandidate } from "@/lib/expenses";
+import { insertTransactionCandidate } from "@/lib/transactions";
 import { askNext, enqueuePending, resolveCategory, resolveDuplicate } from "@/lib/conversation";
 import { parseManualEntryText } from "@/lib/manualEntry";
 import { parsePaypayCsv } from "@/lib/paypayCsv";
+import { parseBankCsv } from "@/lib/bankCsv";
+import { decodeCsvBuffer } from "@/lib/textEncoding";
 import { parseCreditCardPdf } from "@/lib/creditCardPdf";
 import { detectTextInImage, extractTotalAmount } from "@/lib/googleVision";
 
@@ -64,7 +66,7 @@ async function handleMessageEvent(event: LineMessageEvent): Promise<void> {
     }
     default:
       await replyMessage(event.replyToken, [
-        textMessage("対応していないメッセージ形式です。レシート写真・PayPay/クレカの明細ファイル・金額のテキストを送ってください。"),
+        textMessage("対応していないメッセージ形式です。レシート写真・PayPay/クレカ/通帳の明細ファイル・金額のテキストを送ってください。"),
       ]);
   }
 }
@@ -82,12 +84,15 @@ async function handleTextMessage(
     return;
   }
 
-  const result = await insertExpenseCandidate({
+  const result = await insertTransactionCandidate({
     lineUserId,
     occurredAt: new Date(),
     amount: entry.amount,
+    kind: entry.kind,
+    account: entry.kind === "income" ? "cash" : undefined,
     storeName: entry.memo || undefined,
     source: "manual",
+    explicitCategory: entry.explicitCategory,
   });
 
   if (result.outcome === "skipped_duplicate_source") {
@@ -95,14 +100,15 @@ async function handleTextMessage(
     return;
   }
 
-  if (result.expense.status === "confirmed") {
+  if (result.transaction.status === "confirmed") {
+    const kindLabel = entry.kind === "income" ? "収入" : "支出";
     await replyMessage(replyToken, [
-      textMessage(`記録しました: ${entry.amount}円${entry.memo ? ` (${entry.memo})` : ""}`),
+      textMessage(`記録しました（${kindLabel}）: ${entry.amount}円${entry.memo ? ` (${entry.memo})` : ""}`),
     ]);
     return;
   }
 
-  await enqueuePending(lineUserId, [result.expense.id]);
+  await enqueuePending(lineUserId, [result.transaction.id]);
   const questions = await askNext(lineUserId);
   await replyMessage(replyToken, questions);
 }
@@ -132,16 +138,17 @@ async function handleImageMessage(
     return;
   }
 
-  const result = await insertExpenseCandidate({
+  const result = await insertTransactionCandidate({
     lineUserId,
     occurredAt: new Date(),
     amount,
+    kind: "expense",
     source: "receipt",
   });
 
   if (result.outcome === "skipped_duplicate_source") return;
 
-  await enqueuePending(lineUserId, [result.expense.id]);
+  await enqueuePending(lineUserId, [result.transaction.id]);
   const questions = await askNext(lineUserId);
   await replyMessage(replyToken, [
     textMessage(`レシートから${amount}円を読み取りました。`),
@@ -159,7 +166,73 @@ async function handleFileMessage(
   const lower = fileName.toLowerCase();
 
   if (lower.endsWith(".csv")) {
-    const text = stripBom(content.toString("utf-8"));
+    const text = decodeCsvBuffer(content);
+    await handleCsvFile(lineUserId, text, replyToken);
+    return;
+  }
+
+  if (lower.endsWith(".pdf")) {
+    await handleCreditCardPdf(lineUserId, content, replyToken);
+    return;
+  }
+
+  await replyMessage(replyToken, [
+    textMessage("対応していないファイル形式です。PayPay/通帳のCSV、またはクレジットカード明細のPDFを送ってください。"),
+  ]);
+}
+
+async function handleCsvFile(lineUserId: string, text: string, replyToken: string): Promise<void> {
+  const bankResult = parseBankCsv(text);
+  if (bankResult.format !== "unknown") {
+    let confirmed = 0;
+    const pendingIds: string[] = [];
+    let skippedDuplicates = 0;
+
+    for (const t of bankResult.transactions) {
+      const result = await insertTransactionCandidate({
+        lineUserId,
+        occurredAt: t.occurredAt,
+        amount: t.amount,
+        kind: t.kind,
+        account: t.account,
+        storeName: t.description,
+        source: "bank",
+        sourceRef: t.sourceRef,
+        isTransfer: t.isTransfer,
+      });
+
+      if (result.outcome === "skipped_duplicate_source") {
+        skippedDuplicates += 1;
+      } else if (result.transaction.status === "confirmed") {
+        confirmed += 1;
+      } else {
+        pendingIds.push(result.transaction.id);
+      }
+    }
+
+    await enqueuePending(lineUserId, pendingIds);
+    const questions = await askNext(lineUserId);
+
+    const accountLabel = bankResult.format === "yucho" ? "ゆうちょ銀行" : "岩手銀行";
+    const warnings: string[] = [];
+    if (bankResult.balanceMismatchCount > 0) {
+      warnings.push(`残高の整合性チェックで${bankResult.balanceMismatchCount}件不一致がありました`);
+    }
+    if (bankResult.unparsedLines.length > 0) {
+      warnings.push(`読み取れなかった行: ${bankResult.unparsedLines.length}件`);
+    }
+
+    await replyMessage(replyToken, [
+      textMessage(
+        `${accountLabel}の通帳明細を取り込みました。\n自動記録: ${confirmed}件\n確認が必要: ${pendingIds.length}件\n重複でスキップ: ${skippedDuplicates}件\n対象外（ATM引出・チャージ等）: ${bankResult.excludedCount}件` +
+          (warnings.length > 0 ? `\n${warnings.join("\n")}` : "")
+      ),
+      ...questions,
+    ]);
+    return;
+  }
+
+  if (text.startsWith("取引日,出金金額（円）")) {
     const { transactions, skippedCount, unparsedLines } = parsePaypayCsv(text);
 
     let confirmed = 0;
@@ -167,10 +240,12 @@ async function handleFileMessage(
     let skippedDuplicates = 0;
 
     for (const t of transactions) {
-      const result = await insertExpenseCandidate({
+      const result = await insertTransactionCandidate({
         lineUserId,
         occurredAt: t.occurredAt,
         amount: t.amount,
+        kind: "expense",
+        account: "paypay",
         storeName: t.storeName,
         source: "paypay",
         sourceRef: t.sourceRef,
@@ -179,10 +254,10 @@ async function handleFileMessage(
 
       if (result.outcome === "skipped_duplicate_source") {
         skippedDuplicates += 1;
-      } else if (result.expense.status === "confirmed") {
+      } else if (result.transaction.status === "confirmed") {
         confirmed += 1;
       } else {
-        pendingIds.push(result.expense.id);
+        pendingIds.push(result.transaction.id);
       }
     }
 
@@ -199,55 +274,56 @@ async function handleFileMessage(
     return;
   }
 
-  if (lower.endsWith(".pdf")) {
-    const { transactions, extractionFailed } = await parseCreditCardPdf(content);
+  await replyMessage(replyToken, [
+    textMessage("認識できないCSV形式です。PayPay、ゆうちょ銀行、岩手銀行のいずれかの形式に対応しています。"),
+  ]);
+}
 
-    if (extractionFailed) {
-      await replyMessage(replyToken, [
-        textMessage(
-          "このPDFは文字情報が埋め込まれておらず自動解析できませんでした。カード会社のサイトでCSV形式のダウンロードがあればそちらをお送りください。"
-        ),
-      ]);
-      return;
-    }
+async function handleCreditCardPdf(lineUserId: string, content: Buffer, replyToken: string): Promise<void> {
+  const { transactions, extractionFailed } = await parseCreditCardPdf(content);
 
-    let confirmed = 0;
-    const pendingIds: string[] = [];
-    let skippedDuplicates = 0;
-
-    for (const t of transactions) {
-      const result = await insertExpenseCandidate({
-        lineUserId,
-        occurredAt: t.occurredAt,
-        amount: t.amount,
-        storeName: t.storeName,
-        source: "credit_card",
-        sourceRef: t.sourceRef,
-      });
-
-      if (result.outcome === "skipped_duplicate_source") {
-        skippedDuplicates += 1;
-      } else if (result.expense.status === "confirmed") {
-        confirmed += 1;
-      } else {
-        pendingIds.push(result.expense.id);
-      }
-    }
-
-    await enqueuePending(lineUserId, pendingIds);
-    const questions = await askNext(lineUserId);
-
+  if (extractionFailed) {
     await replyMessage(replyToken, [
       textMessage(
-        `クレカ明細を取り込みました。\n自動記録: ${confirmed}件\n確認が必要: ${pendingIds.length}件\n重複でスキップ: ${skippedDuplicates}件`
+        "このPDFは文字情報が埋め込まれておらず自動解析できませんでした。カード会社のサイトでCSV形式のダウンロードがあればそちらをお送りください。"
       ),
-      ...questions,
     ]);
     return;
   }
 
+  let confirmed = 0;
+  const pendingIds: string[] = [];
+  let skippedDuplicates = 0;
+
+  for (const t of transactions) {
+    const result = await insertTransactionCandidate({
+      lineUserId,
+      occurredAt: t.occurredAt,
+      amount: t.amount,
+      kind: "expense",
+      account: "rakuten_card",
+      storeName: t.storeName,
+      source: "credit_card",
+      sourceRef: t.sourceRef,
+    });
+
+    if (result.outcome === "skipped_duplicate_source") {
+      skippedDuplicates += 1;
+    } else if (result.transaction.status === "confirmed") {
+      confirmed += 1;
+    } else {
+      pendingIds.push(result.transaction.id);
+    }
+  }
+
+  await enqueuePending(lineUserId, pendingIds);
+  const questions = await askNext(lineUserId);
+
   await replyMessage(replyToken, [
-    textMessage("対応していないファイル形式です。PayPayのCSV、またはクレジットカード明細のPDFを送ってください。"),
+    textMessage(
+      `クレカ明細を取り込みました。\n自動記録: ${confirmed}件\n確認が必要: ${pendingIds.length}件\n重複でスキップ: ${skippedDuplicates}件`
+    ),
+    ...questions,
   ]);
 }
 
@@ -257,30 +333,26 @@ async function handlePostbackEvent(event: LinePostbackEvent): Promise<void> {
 
   const params = new URLSearchParams(event.postback.data);
   const action = params.get("action");
-  const expenseId = params.get("expenseId");
-  if (!action || !expenseId) return;
+  const transactionId = params.get("transactionId");
+  if (!action || !transactionId) return;
 
   let ack: string;
 
   if (action === "category") {
     const category = params.get("category");
     if (!category || !isCategoryId(category)) return;
-    await resolveCategory(lineUserId, expenseId, category);
+    await resolveCategory(lineUserId, transactionId, category);
     ack = "カテゴリを記録しました。";
   } else if (action === "duplicate") {
     const candidateId = params.get("candidateId");
     const resolution = params.get("resolution");
     if (!candidateId || (resolution !== "merge" && resolution !== "separate")) return;
-    await resolveDuplicate(lineUserId, expenseId, candidateId, resolution);
-    ack = resolution === "merge" ? "重複としてまとめました。" : "別々の支出として記録しました。";
+    await resolveDuplicate(lineUserId, transactionId, candidateId, resolution);
+    ack = resolution === "merge" ? "重複としてまとめました。" : "別々の取引として記録しました。";
   } else {
     return;
   }
 
   const questions = await askNext(lineUserId);
   await replyMessage(event.replyToken, [textMessage(ack), ...questions]);
-}
-
-function stripBom(text: string): string {
-  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
 }
