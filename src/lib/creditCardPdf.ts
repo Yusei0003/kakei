@@ -1,4 +1,4 @@
-import { PDFParse } from "pdf-parse";
+import * as mupdf from "mupdf";
 
 export interface CreditCardTransaction {
   occurredAt: Date;
@@ -11,54 +11,86 @@ export interface CreditCardTransaction {
 export interface ParseCreditCardPdfResult {
   transactions: CreditCardTransaction[];
   /**
-   * 一部のカード会社（確認済み: 楽天カード）はPDF内のフォントが特殊で、
-   * pdf-parse等の標準的なテキスト抽出では文字が全く取れない。
-   * その場合 true になるので、呼び出し側はCSV利用を案内するなどのフォールバックが必要。
+   * 文字が全く抽出できなかった場合にtrueになる。
+   * 過去に pdf-parse (pdf.js系) では楽天カードの明細PDFから文字が取れないことがあったが、
+   * mupdf に切り替えたところ問題なく抽出できることを確認済み。念のため残しているガード。
    */
   extractionFailed: boolean;
 }
 
-// "2026/06/20 カメイ燃料代 本人* 1回払い 7,722 0 7,722 7,722 7,722 0" のような行から
-// 日付・店名・利用金額（手数料や請求額ではなく最初の金額）を取り出す。
-const ROW_PATTERN =
-  /^(\d{4}\/\d{2}\/\d{2})\s+(.+?)\s+(?:\S*\*)\s+(\S+払い)\s+([\d,]+)/;
-
 export async function parseCreditCardPdf(
   buffer: Buffer
 ): Promise<ParseCreditCardPdfResult> {
-  const parser = new PDFParse({ data: buffer });
-  const { text } = await parser.getText();
+  const doc = mupdf.Document.openDocument(buffer, "application/pdf");
+  const lines: string[] = [];
 
-  const meaningfulChars = text.replace(/\s|--.*?--/g, "");
+  try {
+    const pageCount = doc.countPages();
+    for (let i = 0; i < pageCount; i++) {
+      const page = doc.loadPage(i);
+      const text = page.toStructuredText("preserve-whitespace").asText();
+      lines.push(...text.split(/\r\n|\n/));
+    }
+  } finally {
+    doc.destroy();
+  }
+
+  const meaningfulChars = lines.join("").replace(/\s/g, "");
   if (meaningfulChars.length < 50) {
-    // このPDFのフォントからは文字がほぼ取れていない = 既知の抽出不能パターン
     return { transactions: [], extractionFailed: true };
   }
 
-  const transactions = parseCreditCardText(text);
+  const transactions = parseCreditCardLines(lines);
   return { transactions, extractionFailed: transactions.length === 0 };
 }
 
-/** テキスト抽出後の行パースだけを切り出した純粋関数（テスト用にも使う） */
-export function parseCreditCardText(text: string): CreditCardTransaction[] {
-  const transactions: CreditCardTransaction[] = [];
-  for (const line of text.split(/\r\n|\n/)) {
-    const m = line.match(ROW_PATTERN);
-    if (!m) continue;
+const DATE_LINE = /^(\d{4})\/(\d{2})\/(\d{2})$/;
+const PAYER_LINE = /\*$/; // 例: "本人*" "ETC*"
+const PAYMENT_METHOD_LINE = /払い$/; // 例: "1回払い"
 
-    const [, dateStr, storeName, , amountStr] = m;
-    const amount = Number(amountStr.replace(/,/g, ""));
+/**
+ * 楽天カードの明細PDFはテキスト抽出すると1項目1行になる。
+ * 日付・店名・利用者・支払方法・利用金額...の5〜6行が1取引のまとまりとして並ぶ。
+ *   2026/06/20
+ *   カメイ燃料代
+ *   本人*
+ *   1回払い
+ *         7,722   ← 利用金額（これだけ使う）
+ *           0
+ *         7,722
+ *   ...
+ * 日付行の直後2行が「支払者(*で終わる)」「支払方法(払いで終わる)」のパターンに
+ * 一致する場合だけを取引行として扱うことで、ヘッダーの日付など無関係な行を除外する。
+ */
+export function parseCreditCardLines(lines: string[]): CreditCardTransaction[] {
+  const transactions: CreditCardTransaction[] = [];
+
+  for (let i = 0; i < lines.length - 4; i++) {
+    const dateMatch = lines[i].trim().match(DATE_LINE);
+    if (!dateMatch) continue;
+
+    const storeName = lines[i + 1].trim();
+    const payerLine = lines[i + 2].trim();
+    const paymentMethodLine = lines[i + 3].trim();
+    const amountLine = lines[i + 4].trim();
+
+    if (!storeName || !PAYER_LINE.test(payerLine) || !PAYMENT_METHOD_LINE.test(paymentMethodLine)) {
+      continue;
+    }
+
+    const amount = Number(amountLine.replace(/,/g, ""));
     if (!Number.isFinite(amount) || amount <= 0) continue;
 
-    const [y, mo, d] = dateStr.split("/");
+    const [, y, mo, d] = dateMatch;
     const occurredAt = new Date(`${y}-${mo}-${d}T00:00:00+09:00`);
 
     transactions.push({
       occurredAt,
       amount,
-      storeName: storeName.trim(),
-      sourceRef: `${dateStr}_${storeName.trim()}_${amount}`,
+      storeName,
+      sourceRef: `${y}${mo}${d}_${storeName}_${amount}`,
     });
   }
+
   return transactions;
 }
