@@ -73,7 +73,16 @@ type QuickReplyMessage = ReturnType<typeof categoryQuickReplyMessage>;
  */
 export async function askNext(lineUserId: string): Promise<QuickReplyMessage[]> {
   const state = await loadState(lineUserId);
-  if (state.current_transaction_id) return [];
+
+  if (state.current_transaction_id) {
+    const current = await getTransactionById(state.current_transaction_id);
+    if (current && current.status !== "confirmed") {
+      return []; // まだ回答待ち
+    }
+    // 参照先が削除済み、または別経路(ダッシュボード等)で解決済み → 会話状態を修復して先へ進む
+    state.current_transaction_id = null;
+    state.awaiting = null;
+  }
 
   while (state.pending_queue.length > 0) {
     const nextId = state.pending_queue.shift()!;

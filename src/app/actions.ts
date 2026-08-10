@@ -40,6 +40,17 @@ export async function resolveDuplicateAction(formData: FormData): Promise<void> 
   revalidatePath("/");
 }
 
+export async function deleteTransactionAction(formData: FormData): Promise<void> {
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+
+  const supabase = getSupabaseServerClient();
+  const { error } = await supabase.from("transactions").delete().eq("id", id);
+  if (error) throw error;
+
+  revalidatePath("/");
+}
+
 export async function updateLearnedCategoryAction(formData: FormData): Promise<void> {
   const id = String(formData.get("id") ?? "");
   const category = String(formData.get("category") ?? "");

@@ -17,6 +17,7 @@ import TrendChart from "./TrendChart";
 import {
   confirmCategoryAction,
   deleteLearnedCategoryAction,
+  deleteTransactionAction,
   resolveDuplicateAction,
   updateLearnedCategoryAction,
 } from "./actions";
@@ -190,12 +191,13 @@ export default async function DashboardPage({
                 <th>店名・摘要</th>
                 <th>カテゴリ</th>
                 <th style={{ textAlign: "right" }}>金額</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
               {recent.length === 0 && (
                 <tr>
-                  <td colSpan={5} className={styles.muted}>
+                  <td colSpan={6} className={styles.muted}>
                     まだ取引がありません
                   </td>
                 </tr>
@@ -213,6 +215,14 @@ export default async function DashboardPage({
                   <td>{t.storeName ?? "—"}</td>
                   <td>{categoryLabelOf(t)}</td>
                   <td className="amount">{formatYen(t.amount)}</td>
+                  <td>
+                    <form action={deleteTransactionAction}>
+                      <input type="hidden" name="id" value={t.id} />
+                      <button type="submit" className={styles.button}>
+                        削除
+                      </button>
+                    </form>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -344,6 +354,13 @@ function PendingItem({
           </form>
         </div>
       )}
+
+      <form action={deleteTransactionAction}>
+        <input type="hidden" name="id" value={tx.id} />
+        <button type="submit" className={styles.button}>
+          削除
+        </button>
+      </form>
     </div>
   );
 }
