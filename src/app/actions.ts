@@ -16,7 +16,15 @@ export async function confirmCategoryAction(formData: FormData): Promise<void> {
 
   // 送金・振込は相手によって用途が毎回変わるため学習させない(LINE側の会話フローと同じ規則)
   if (tx && !tx.isTransfer && tx.storeName) {
-    await saveLearnedCategory(tx.lineUserId, tx.storeName, category as CategoryId);
+    await saveLearnedCategory({
+      lineUserId: tx.lineUserId,
+      storeName: tx.storeName,
+      kind: tx.kind,
+      category: category as CategoryId,
+      recordRecurrence: tx.source === "bank",
+      occurredAt: new Date(tx.occurredAt),
+      amount: tx.amount,
+    });
   }
 
   revalidatePath("/");

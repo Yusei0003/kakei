@@ -5,7 +5,8 @@ import {
   updateTransaction,
 } from "@/lib/transactions";
 import { findDuplicateCandidates } from "@/lib/dedup";
-import { saveLearnedCategory } from "@/lib/storeCategory";
+import { getLearnedCategory, saveLearnedCategory } from "@/lib/storeCategory";
+import { describeRecurrence } from "@/lib/recurrence";
 import { CategoryId, EXPENSE_CATEGORIES, INCOME_CATEGORIES } from "@/lib/categories";
 import {
   categoryQuickReplyMessage,
@@ -121,9 +122,10 @@ export async function askNext(lineUserId: string): Promise<QuickReplyMessage[]> 
     state.awaiting = "category";
     await saveState(state);
     const categories = tx.kind === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+    const hint = await buildRecurrenceHint(lineUserId, tx);
     return [
       categoryQuickReplyMessage(
-        `${formatTransactionLine(tx)}\nカテゴリを選んでください`,
+        `${formatTransactionLine(tx)}${hint}\nカテゴリを選んでください`,
         tx.id,
         categories
       ),
@@ -132,6 +134,24 @@ export async function askNext(lineUserId: string): Promise<QuickReplyMessage[]> 
 
   await saveState(state);
   return [];
+}
+
+/**
+ * 学習済みの摘要なのにカテゴリを聞いているということは、周期が「いつもと違う」と
+ * 判定されたということ。何がいつもと違うのかを添えて確認しやすくする。
+ */
+async function buildRecurrenceHint(lineUserId: string, tx: Transaction): Promise<string> {
+  if (tx.source !== "bank" || !tx.storeName) return "";
+
+  const learned = await getLearnedCategory({
+    lineUserId,
+    storeName: tx.storeName,
+    kind: tx.kind,
+  });
+  const description = describeRecurrence(learned?.pattern ?? null);
+  if (!description) return "";
+
+  return `\n※いつもと違います（通常は ${description}）`;
 }
 
 function formatTransactionLine(tx: Transaction): string {
@@ -155,7 +175,16 @@ export async function resolveCategory(
 
   // 送金・振込は相手によって用途が毎回変わるため学習させない
   if (tx && !tx.isTransfer && tx.storeName) {
-    await saveLearnedCategory(lineUserId, tx.storeName, category);
+    await saveLearnedCategory({
+      lineUserId,
+      storeName: tx.storeName,
+      kind: tx.kind,
+      category,
+      // 銀行明細だけ周期（発生日・金額）も蓄積する
+      recordRecurrence: tx.source === "bank",
+      occurredAt: new Date(tx.occurredAt),
+      amount: tx.amount,
+    });
   }
 
   state.current_transaction_id = null;

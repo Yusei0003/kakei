@@ -240,6 +240,8 @@ export default async function DashboardPage({
             <thead>
               <tr>
                 <th>店名・摘要</th>
+                <th>収支</th>
+                <th>いつもの周期</th>
                 <th>カテゴリ</th>
                 <th></th>
               </tr>
@@ -247,7 +249,7 @@ export default async function DashboardPage({
             <tbody>
               {learned.length === 0 && (
                 <tr>
-                  <td colSpan={3} className={styles.muted}>
+                  <td colSpan={5} className={styles.muted}>
                     まだ学習したカテゴリがありません
                   </td>
                 </tr>
@@ -256,10 +258,22 @@ export default async function DashboardPage({
                 <tr key={l.id}>
                   <td>{l.storePattern}</td>
                   <td>
+                    <span
+                      className={`${styles.badge} ${l.kind === "income" ? styles.badgeIncome : styles.badgeExpense}`}
+                    >
+                      {l.kind === "income" ? "収入" : "支出"}
+                    </span>
+                  </td>
+                  <td className={styles.muted}>{l.recurrence ?? "—"}</td>
+                  <td>
                     <form action={updateLearnedCategoryAction} className={styles.inlineForm}>
                       <input type="hidden" name="id" value={l.id} />
-                      <select name="category" defaultValue={l.category} className={styles.select}>
-                        {[...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES].map((c) => (
+                      <select
+                        name="category"
+                        defaultValue={l.category}
+                        className={styles.select}
+                      >
+                        {(l.kind === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES).map((c) => (
                           <option key={c.id} value={c.id}>
                             {c.label}
                           </option>

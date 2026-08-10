@@ -1,6 +1,7 @@
 import { getSupabaseServerClient } from "@/lib/supabase";
 import { CategoryId, categoryLabel } from "@/lib/categories";
 import { Transaction, TransactionKind, TransactionStatus } from "@/lib/transactions";
+import { describeRecurrence } from "@/lib/recurrence";
 
 interface TransactionRow {
   id: string;
@@ -204,23 +205,41 @@ export async function getRecentTransactions(lineUserId: string, limit: number): 
 export interface LearnedCategoryRow {
   id: string;
   storePattern: string;
+  kind: TransactionKind;
   category: CategoryId;
   categoryLabel: string;
+  /** 銀行明細の固定費・定期収入で学習した周期。例: "毎月27日・57,739円" */
+  recurrence: string | null;
 }
 
 export async function getLearnedCategories(lineUserId: string): Promise<LearnedCategoryRow[]> {
   const supabase = getSupabaseServerClient();
   const { data, error } = await supabase
     .from("store_category_map")
-    .select("id, store_pattern, category")
+    .select("id, store_pattern, kind, category, sample_count, day_min, day_max, amount_min, amount_max")
     .eq("line_user_id", lineUserId)
     .order("store_pattern", { ascending: true });
 
   if (error) throw error;
-  return (data ?? []).map((row) => ({
-    id: row.id as string,
-    storePattern: row.store_pattern as string,
-    category: row.category as CategoryId,
-    categoryLabel: categoryLabel(row.category as CategoryId),
-  }));
+  return (data ?? []).map((row) => {
+    const pattern =
+      row.sample_count != null && row.day_min != null && row.amount_min != null
+        ? {
+            sampleCount: row.sample_count as number,
+            dayMin: row.day_min as number,
+            dayMax: row.day_max as number,
+            amountMin: row.amount_min as number,
+            amountMax: row.amount_max as number,
+          }
+        : null;
+
+    return {
+      id: row.id as string,
+      storePattern: row.store_pattern as string,
+      kind: row.kind as TransactionKind,
+      category: row.category as CategoryId,
+      categoryLabel: categoryLabel(row.category as CategoryId),
+      recurrence: describeRecurrence(pattern),
+    };
+  });
 }

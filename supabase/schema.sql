@@ -50,12 +50,15 @@ create index if not exists transactions_status_idx on transactions (status);
 create index if not exists transactions_line_user_id_idx on transactions (line_user_id);
 create index if not exists transactions_kind_idx on transactions (kind);
 
--- 店名 → カテゴリの学習テーブル。一度LINEで回答されたら以後は自動適用する
+-- 店名 → カテゴリの学習テーブル。一度LINEで回答されたら以後は自動適用する。
+-- 同じ摘要でも収入と支出では意味が変わるため、kindまで含めて1件とする
+-- （例: 給与の振込元と同じ相手への出金を「給与」と誤判定しないため）。
 create table if not exists store_category_map (
   id uuid primary key default gen_random_uuid(),
   line_user_id text not null,
   -- 正規化した店名（例: "セブン-イレブン - 陸前高田竹駒町" -> "セブン-イレブン"）
   store_pattern text not null,
+  kind text not null check (kind in ('expense', 'income')),
   category text not null check (
     category in (
       'food', 'daily_goods', 'transport_car', 'communication',
@@ -64,12 +67,19 @@ create table if not exists store_category_map (
       'salary', 'honorarium', 'interest', 'other_income'
     )
   ),
+  -- 銀行明細の固定費・定期収入の周期。観測された日付と金額の範囲を蓄積し、
+  -- 「いつもと違う」取引の検知に使う（銀行明細以外ではnullのまま）
+  sample_count integer,
+  day_min integer,
+  day_max integer,
+  amount_min integer,
+  amount_max integer,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
 
 create unique index if not exists store_category_map_unique
-  on store_category_map (line_user_id, store_pattern);
+  on store_category_map (line_user_id, store_pattern, kind);
 
 -- LINE上での「カテゴリを選んでください」「重複ですか？」という一問一答を
 -- 順番に処理するための会話状態。ユーザーごとに1レコード。

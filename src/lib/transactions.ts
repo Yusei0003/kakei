@@ -96,7 +96,20 @@ export async function insertTransactionCandidate(
 
   let category: CategoryId | null = input.explicitCategory ?? null;
   if (!category && !input.isTransfer && input.storeName) {
-    category = await getLearnedCategory(input.lineUserId, input.storeName);
+    // 周期チェックは銀行明細のみ。コンビニ決済のように日付も金額もばらつくものに
+    // 適用すると毎回「いつもと違う」になってしまうため
+    const learned = await getLearnedCategory({
+      lineUserId: input.lineUserId,
+      storeName: input.storeName,
+      kind: input.kind,
+      checkRecurrence: input.source === "bank",
+      occurredAt: input.occurredAt,
+      amount: input.amount,
+    });
+    // いつもの周期から外れている銀行明細は自動確定せず、カテゴリ確認へ回す
+    if (learned && !learned.anomalous) {
+      category = learned.category;
+    }
   }
 
   const duplicates = await findDuplicateCandidates({
