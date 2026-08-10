@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
 // ダッシュボードは実際の収支データを表示するため、簡易的なBasic認証で保護する。
-// LINEのWebhookは対象外（LINEサーバーからの署名付きリクエストを通す必要があるため）。
+// LINEのWebhookと月次リマインドのCronは対象外
+// （それぞれLINEの署名検証、CRON_SECRETによる認証を別途行っているため）。
 export function proxy(req: NextRequest): NextResponse {
   const user = process.env.DASHBOARD_USERNAME;
   const pass = process.env.DASHBOARD_PASSWORD;
@@ -29,5 +30,5 @@ export function proxy(req: NextRequest): NextResponse {
 }
 
 export const config = {
-  matcher: ["/((?!api/line/webhook|_next/static|_next/image|favicon.ico).*)"],
+  matcher: ["/((?!api/line/webhook|api/cron/|_next/static|_next/image|favicon.ico).*)"],
 };
